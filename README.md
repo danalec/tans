@@ -85,14 +85,35 @@ let decoded: Vec<u32> = decoder.decode_all(data.len());
 
 ## Performance Characteristics
 
-| Table Size (L) | Memory | Precision | Speed |
-|----------------|--------|-----------|-------|
-| 2^8 = 256 | 256 B | Poor | Very fast |
-| 2^12 = 4096 | 4 KB | Good | Fast (L1 cache) |
-| 2^16 = 65536 | 64 KB | Excellent | Medium |
-| 2^20+ | >1 MB | Near-optimal | Slower (cache misses) |
+| Table Size (L) | Memory per table | Precision | Speed |
+|----------------|------------------|-----------|-------|
+| 2^8 = 256 | 1 KB | Poor | Very fast |
+| 2^12 = 4096 | 16 KB | Good | Fast (L1 cache) |
+| 2^16 = 65536 | 256 KB | Excellent | Medium |
+| 2^20+ | >4 MB | Near-optimal | Slower (cache misses) |
 
-**Recommended**: L = 2^12 (4096 entries) for 256-symbol alphabets — fits in L1 cache while providing good precision.
+`RansTable`/`StateTable` store one `u32` per slot; `FseTable`/`TansTable` store a
+12-byte `DecodeEntry`. **Recommended**: L = 2^12 (4096 entries) for 256-symbol
+alphabets — 16 KB keeps the hot table in L1 while providing good precision.
+
+### Measured overhead over the Shannon entropy
+
+The crate's state machine is a deterministic automaton: renormalization always
+shifts as few bits as it can, so a long run of the same symbol settles into a
+fixed point and pays a rounded per-symbol cost. Uniform data is unaffected;
+skewed data pays a measurable penalty.
+
+| Input | Symbols | Table | Entropy | Encoded | Overhead |
+|-------|---------|-------|---------|---------|----------|
+| Uniform, 256 symbols | 10 000 | 2^10 | 80 000 bits | 80 011 bits | +0.01% |
+| Uniform, 256 symbols | 10 000 | 2^12 | 80 000 bits | 80 013 bits | +0.02% |
+| 70 / 20 / 10 | 1 000 | 2^10 | 1 157 bits | 1 283 bits | +10.9% |
+| 1/3 vs 2/3 | 10 000 | 2^10 | 9 183 bits | 10 011 bits | +9.0% |
+
+Raising `table_log` does not shrink the gap — it is not state granularity. See
+§8.5 for why, and for the two ways out (interleaved states, or the FSE state
+convention). `tests/regression_tests.rs` pins these bounds so a change to the
+renormalization loop cannot silently make them worse.
 
 ## Benchmarks
 
@@ -553,22 +574,30 @@ for (int i = N-1; i >= 0; i--) {
 
 ### 6.2 Flush and Initialization
 
+The encoder's state always lives in `[L, 2L)`, which needs `log2L + 1` bits. Both
+variants below are equivalent — pick one and use it on both sides:
+
 ```cpp
-// Encoder flush: write final state
+// Option A (what this crate does): write the full state, read it back as-is.
 void flush(uint32_t state, BitWriter& writer) {
-    uint32_t finalBits = log2L + 1;  // enough for [L, 2L-1]
-    writer.write(state - L, finalBits);  // NOT full state!
-    writer.flush();
+    writer.write(state, log2L + 1);
+}
+uint32_t init(BitReader& reader) {
+    return reader.read(log2L + 1);   // already in [L, 2L)
 }
 
-// Decoder init: read final state from bitstream end
+// Option B: write the offset from L, read it back and add L.
+void flush(uint32_t state, BitWriter& writer) {
+    writer.write(state - L, log2L + 1);
+}
 uint32_t init(BitReader& reader) {
-    uint32_t finalBits = log2L + 1;
-    return L + reader.read_from_end(finalBits);
+    return L + reader.read(log2L + 1);
 }
 ```
 
-**Common mistake**: Writing full state instead of `state - L` causes off-by-L error.
+**Common mistake**: pairing option A's flush with option B's init (or vice
+versa) shifts every state by L. Because `state - L < L` fits in `log2L` bits,
+both are safe as long as the reader adds back exactly what the writer removed.
 
 ### 6.3 Interleaved Multi-State ANS
 
@@ -620,34 +649,46 @@ See Alverson's "Integer Division Using Reciprocals" for magic constant derivatio
 
 ### 6.5 Bitstream Implementation
 
+Bits are packed least-significant-first into a 64-bit accumulator and drained a
+byte at a time; reading walks the same bits back in reverse write order.
+
 ```rust
 pub struct BitWriter {
-    buffer: Vec<u8>,
-    current: u64,
-    bits_in_current: u32,
+    acc: u64,      // bits not yet drained into `bytes`
+    acc_bits: u32, // how many bits of `acc` are live (always < 8 after a write)
+    bytes: Vec<u8>,
 }
 
 impl BitWriter {
     pub fn write(&mut self, value: u32, nbits: u32) {
-        self.current |= (value as u64) << self.bits_in_current;
-        self.bits_in_current += nbits;
-        
-        while self.bits_in_current >= 8 {
-            self.buffer.push((self.current & 0xFF) as u8);
-            self.current >>= 8;
-            self.bits_in_current -= 8;
+        assert!(nbits <= 32);
+        if nbits == 0 {
+            return;
+        }
+        self.acc |= (value as u64) << self.acc_bits;
+        self.acc_bits += nbits;
+
+        while self.acc_bits >= 8 {
+            self.bytes.push(self.acc as u8);
+            self.acc >>= 8;
+            self.acc_bits -= 8;
         }
     }
-    
-    pub fn finish(&mut self) -> (Vec<u8>, u32) {
-        if self.bits_in_current > 0 {
-            self.buffer.push((self.current & 0xFF) as u8);
+
+    pub fn finish(mut self) -> (Vec<u8>, usize) {
+        let total_bits = self.bytes.len() * 8 + self.acc_bits as usize;
+        if self.acc_bits > 0 {
+            self.bytes.push(self.acc as u8);
         }
-        let total_bits = (self.buffer.len() as u32 - 1) * 8 + self.bits_in_current;
-        (self.buffer.clone(), total_bits)
+        (self.bytes, total_bits)
     }
 }
 ```
+
+`BitReader` reinterprets the buffer as little-endian `u64` words, so a read of up
+to 32 bits never touches more than two words regardless of alignment. `acc_bits`
+stays below 8 after every write, which is what keeps `value << acc_bits` inside 64
+bits for a 32-bit value.
 
 ---
 
@@ -662,6 +703,14 @@ impl BitWriter {
 | Correct for short inputs, wrong for long | Buffer boundary mishandled |
 | All decodes wrong, seemingly random | Table spread mismatch |
 | Every Nth symbol wrong (N=interleave) | Multi-state flush/init order wrong |
+| Round-trip fails only past 256 symbols | Decode entry `symbol` field too narrow |
+| Round-trip fails only at `log >= 17` | Decode entry `new_state` field too narrow |
+| Suite hangs instead of failing | Encoding a symbol whose frequency is 0 |
+| Decodes fine but ratio far from entropy | State converged to a per-run fixed point (§8.5) |
+
+The last three are silent by construction: none of them produces an error, they
+produce wrong bytes or no bytes at all. Type widths and the frequency-0 case are
+covered by `tests/regression_tests.rs`.
 
 ### 7.2 Normalization Direction Bug
 
@@ -822,6 +871,44 @@ loop {
     if output.len() >= count { break; }
 }
 ```
+
+### 8.6 Why Skewed Data Costs ~10% Over Entropy
+
+This crate's decoder reconstructs the previous state as:
+
+```
+x     = freq + (slot - cumul)        // in [freq, 2*freq)
+nb    = log2L - floor(log2(x))
+prev  = (x << nb) | read(nb)         // in [L, 2L)
+```
+
+`x` is therefore fully determined by the slot, `nb` is fully determined by `x`,
+and the bits the encoder emits are forced: it writes the low `nb` bits of the
+state it already holds. The encoder has no freedom in the transition — it only
+chooses how many shifts to make, and the minimal count is always cheapest.
+
+The consequence shows up on runs. For a symbol with frequency 205 in a 1024-entry
+table, a run of that symbol settles into `x ≈ 205`, which costs three
+renormalization bits per symbol against 2.32 bits of information. Measured on
+1000 symbols of 70/20/10 data: 273 bits emitted for the symbol carrying 360 bits
+of information, 600 for the symbol carrying 464, 399 for the symbol carrying 333.
+The frequent symbol under-pays and the rare ones over-pay, and the over-payment
+dominates.
+
+Two ways out, neither implemented here:
+
+- **Interleaved states** (§6.3). N independent states drift apart, so no run keeps
+  every state pinned to the same fixed point. This is the cheap option: it reuses
+  the existing transition and only changes how many states are flushed.
+- **The FSE state convention** (§4.3). FSE keeps the decoder state in `[0, L)`,
+  reads a fixed `nb_bits` per symbol from the table, and lets the encoder *choose*
+  the new state by choosing the bits it writes. That extra freedom is what buys
+  FSE its near-entropy ratios; the price is an encoding table and a per-symbol
+  search for the encodable state.
+
+Raising `table_log` does not help — the gap is identical at 2^10, 2^12 and 2^14,
+because the loss comes from the transition rule rather than from state
+granularity.
 
 ---
 
