@@ -168,10 +168,13 @@ fn normalization_never_exceeds_the_table_capacity() {
     assert_eq!(freqs, vec![64, 64, 64, 64]);
 }
 
-/// Pins the compression overhead the crate currently achieves, so a future
-/// change to the renormalisation loop cannot quietly make it much worse.
-/// The current state machine pays a per-run rounding cost: uniform data lands
-/// within 0.02% of the entropy, skewed data around 10%.
+/// Pins the compression the crate currently achieves, so a change to the
+/// renormalization loop cannot quietly make it much worse.
+///
+/// The bound is a worst case: this state machine is incomplete, so the same
+/// multiset encodes to different sizes depending on its ordering (README 8.6).
+/// For 70/20/10 that spread is 1103..1283 bits against an entropy of 1157, so
+/// the single-shot figure is the top of the range, not the typical one.
 #[test]
 fn compression_overhead_stays_bounded() {
     let cases: Vec<(&str, Vec<u32>, f64, u32)> = vec![
@@ -208,6 +211,62 @@ fn compression_overhead_stays_bounded() {
             "{name}: {bits} bits against an ideal of {ideal:.0} (log={log})"
         );
     }
+}
+
+/// The encoded size depends on the ordering of the same multiset, because the
+/// state machine is not a complete code. This pins that the *mean* over
+/// orderings stays near the entropy: a bound on one ordering could be met by
+/// luck, but a mean that drifts up means every ordering got worse.
+#[test]
+fn mean_over_orderings_stays_near_the_entropy() {
+    let runs: Vec<u32> = (0..1000)
+        .map(|i| {
+            if i < 700 {
+                0
+            } else if i < 900 {
+                1
+            } else {
+                2
+            }
+        })
+        .collect();
+
+    // A stride coprime with the length visits every position exactly once, so
+    // each ordering holds exactly the same multiset.
+    let n = runs.len();
+    let mut sizes = Vec::new();
+    for stride in [1usize, 7, 101, 211, 307, 401, 499, 601, 809, 907, 337] {
+        if gcd(stride, n) != 1 {
+            continue;
+        }
+        let mut data = Vec::with_capacity(n);
+        let mut i = 0usize;
+        while data.len() < n {
+            data.push(runs[i]);
+            i = (i + stride) % n;
+        }
+        assert_eq!(data.iter().filter(|&&s| s == 0).count(), 700);
+
+        let (_, _, bits, decoded) = &all_variants(&data, 10)[0];
+        assert_eq!(decoded, &data, "stride {stride} changed the data");
+        sizes.push(*bits);
+    }
+
+    let entropy = 1156.8f64;
+    let mean = sizes.iter().map(|&b| b as f64).sum::<f64>() / sizes.len() as f64;
+    assert!(
+        mean <= entropy * 1.05,
+        "mean of {sizes:?} is {mean:.1} bits against an entropy of {entropy:.0}"
+    );
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
 }
 
 #[test]

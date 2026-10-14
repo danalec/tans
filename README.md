@@ -98,22 +98,19 @@ alphabets — 16 KB keeps the hot table in L1 while providing good precision.
 
 ### Measured overhead over the Shannon entropy
 
-The crate's state machine is a deterministic automaton: renormalization always
-shifts as few bits as it can, so a long run of the same symbol settles into a
-fixed point and pays a rounded per-symbol cost. Uniform data is unaffected;
-skewed data pays a measurable penalty.
+Averaged over 12 orderings of the same multiset, so the number reflects the
+codec rather than one lucky or unlucky arrangement:
 
-| Input | Symbols | Table | Entropy | Encoded | Overhead |
-|-------|---------|-------|---------|---------|----------|
-| Uniform, 256 symbols | 10 000 | 2^10 | 80 000 bits | 80 011 bits | +0.01% |
-| Uniform, 256 symbols | 10 000 | 2^12 | 80 000 bits | 80 013 bits | +0.02% |
-| 70 / 20 / 10 | 1 000 | 2^10 | 1 157 bits | 1 283 bits | +10.9% |
-| 1/3 vs 2/3 | 10 000 | 2^10 | 9 183 bits | 10 011 bits | +9.0% |
+| Input | Symbols | Entropy | Encoded (mean) | Overhead | Range over orderings |
+|-------|---------|---------|----------------|----------|----------------------|
+| Uniform, 256 symbols | 10 000 | 80 000 bits | 80 011 bits | +0.01% | identical for every ordering |
+| 1/3 vs 2/3 | 10 000 | 9 184 bits | 10 011 bits | +9.01% | identical for every ordering |
+| 70 / 20 / 10 | 1 000 | 1 157 bits | 1 180 bits | +2.04% | −4.65% … +10.91% |
 
-Raising `table_log` does not shrink the gap — it is not state granularity. See
-§8.5 for why, and for the two ways out (interleaved states, or the FSE state
-convention). `tests/regression_tests.rs` pins these bounds so a change to the
-renormalization loop cannot silently make them worse.
+Raising `table_log` does not change the gap — it is not state granularity. The
+70/20/10 row has a wide spread because this state machine is not a complete
+code (§8.6): some orderings of the same data encode *below* the entropy, others
+well above it, and only the mean is meaningful. See §8.6.
 
 ## Benchmarks
 
@@ -706,7 +703,7 @@ bits for a 32-bit value.
 | Round-trip fails only past 256 symbols | Decode entry `symbol` field too narrow |
 | Round-trip fails only at `log >= 17` | Decode entry `new_state` field too narrow |
 | Suite hangs instead of failing | Encoding a symbol whose frequency is 0 |
-| Decodes fine but ratio far from entropy | State converged to a per-run fixed point (§8.5) |
+| Decodes fine but ratio far from entropy | Check the ordering: the code is incomplete (§8.6) |
 
 The last three are silent by construction: none of them produces an error, they
 produce wrong bytes or no bytes at all. Type widths and the frequency-0 case are
@@ -872,9 +869,9 @@ loop {
 }
 ```
 
-### 8.6 Why Skewed Data Costs ~10% Over Entropy
+### 8.6 The Code Is Not Complete: Compression Trades Variance, Not Average
 
-This crate's decoder reconstructs the previous state as:
+The decoder reconstructs the previous state as:
 
 ```
 x     = freq + (slot - cumul)        // in [freq, 2*freq)
@@ -882,33 +879,40 @@ nb    = log2L - floor(log2(x))
 prev  = (x << nb) | read(nb)         // in [L, 2L)
 ```
 
-`x` is therefore fully determined by the slot, `nb` is fully determined by `x`,
-and the bits the encoder emits are forced: it writes the low `nb` bits of the
-state it already holds. The encoder has no freedom in the transition — it only
-chooses how many shifts to make, and the minimal count is always cheapest.
+`x` is fully determined by the slot, `nb` is fully determined by `x`, and the
+bits the encoder emits are forced: it writes the low `nb` bits of the state it
+already holds. The only choice is how many shifts to make, and the decoder
+re-derives the same count, so the transition has no degrees of freedom.
 
-The consequence shows up on runs. For a symbol with frequency 205 in a 1024-entry
-table, a run of that symbol settles into `x ≈ 205`, which costs three
-renormalization bits per symbol against 2.32 bits of information. Measured on
-1000 symbols of 70/20/10 data: 273 bits emitted for the symbol carrying 360 bits
-of information, 600 for the symbol carrying 464, 399 for the symbol carrying 333.
-The frequent symbol under-pays and the rare ones over-pay, and the over-payment
-dominates.
+That makes the code **incomplete**: for a fixed symbol the encoder maps `L`
+possible states onto only `freq` possible new states, and the collapsed states
+are told apart by the bits written rather than by the state. The total number of
+bit patterns still balances, but individual inputs do not. Encoding 1000 symbols
+of 70/20/10 data in twelve different orderings gives sizes from 1103 to 1283
+bits — some orderings land 4.7% *below* the Shannon entropy of the input, which
+no complete code can do, and others land 10.9% above it. The mean is +2.04%.
 
-Two ways out, neither implemented here:
+An earlier revision of this guide blamed long symbol runs for a flat ~10%
+penalty. That is wrong: a round-robin ordering, which has no long runs at all,
+produces the same 1283 bits as three solid runs. What matters is the arrangement
+the state happens to be in, not the run lengths.
 
-- **Interleaved states** (§6.3). N independent states drift apart, so no run keeps
-  every state pinned to the same fixed point. This is the cheap option: it reuses
-  the existing transition and only changes how many states are flushed.
-- **The FSE state convention** (§4.3). FSE keeps the decoder state in `[0, L)`,
-  reads a fixed `nb_bits` per symbol from the table, and lets the encoder *choose*
-  the new state by choosing the bits it writes. That extra freedom is what buys
-  FSE its near-entropy ratios; the price is an encoding table and a per-symbol
-  search for the encodable state.
+#### Interventions that were tried and did not help
 
-Raising `table_log` does not help — the gap is identical at 2^10, 2^12 and 2^14,
-because the loss comes from the transition rule rather than from state
-granularity.
+| Change | 70/20/10 result |
+|--------|-----------------|
+| FSE state convention (decoder state in `[0, L)`, fixed `nb_bits`) | 1282 bits |
+| FSE's step-function table spread | 1301 bits |
+| Renormalize to the state that maximizes `log2(y/x)` instead of the minimum shift | 1282 bits |
+| Search all 1024 legal initial states | 1283 bits (the current one already wins) |
+| Interleaved states, N = 2 / 4 / 8 | 1294 / 1316 / 1356 bits |
+
+None of them improves on the current transition, which is why the crate ships
+one state machine rather than four. The uniform-alphabet result (+0.01%) shows
+the transition itself is sound; what remains is the incompleteness above, and
+closing it properly needs a *complete* code, which is a different design
+(arithmetic coding, or a tANS variant with an encoding table and a per-symbol
+encodable-state search) rather than a tweak to this one.
 
 ---
 
