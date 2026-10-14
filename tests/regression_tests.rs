@@ -1,0 +1,227 @@
+//! Regression tests for defects found while auditing the crate.
+//!
+//! Each test here corresponds to a bug that shipped and was reproduced before
+//! being fixed; the comments record what actually went wrong, because the shape
+//! of the failure is easy to forget once it is gone.
+
+use tans::*;
+
+/// rANS / table tANS / full tANS / FSE, all driven through their one-shot API.
+fn all_variants(data: &[u32], log: u32) -> Vec<(&'static str, Vec<u8>, usize, Vec<u32>)> {
+    let n = data.len();
+
+    let (rt, rb, rn) = encode(data, log);
+    let rans = decode(&rt, &rb, rn, n);
+
+    let (tt, tb, tn) = table_encode(data, log);
+    let table = table_decode(&tt, &tb, tn, n);
+
+    let (at, ab, an) = tans_encode(data, log);
+    let tans = tans_decode(&at, &ab, an, n);
+
+    let (ft, fb, fn_) = fse_encode(data, log);
+    let fse = fse_decode(&ft, &fb, fn_, n);
+
+    vec![
+        ("rans", rb, rn, rans),
+        ("table", tb, tn, table),
+        ("tans", ab, an, tans),
+        ("fse", fb, fn_, fse),
+    ]
+}
+
+fn distributions() -> Vec<(&'static str, Vec<u32>)> {
+    vec![
+        ("uniform-2", vec![0, 1, 0, 1, 0, 1, 0, 1]),
+        ("uniform-4", (0..200).map(|i| i % 4).collect()),
+        ("uniform-256", (0..2000).map(|i| i % 256).collect()),
+        ("single", vec![7u32; 64]),
+        (
+            "skewed-70-20-10",
+            (0..1000)
+                .map(|i| {
+                    if i < 700 {
+                        0
+                    } else if i < 900 {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .collect(),
+        ),
+        (
+            "sparse-alphabet",
+            (0..400).map(|i| if i % 3 == 0 { 0 } else { 200 }).collect(),
+        ),
+        ("one-run-then-other", {
+            let mut v = vec![0u32; 200];
+            v.extend(std::iter::repeat_n(1u32, 200));
+            v
+        }),
+    ]
+}
+
+#[test]
+fn every_variant_roundtrips_every_distribution() {
+    for (name, data) in distributions() {
+        for log in 6..=12u32 {
+            if (1u32 << log) < data.iter().copied().max().unwrap_or(0) + 1 {
+                continue; // table too small for the alphabet
+            }
+            for (variant, _, bits, decoded) in all_variants(&data, log) {
+                assert_eq!(decoded, data, "{variant} lost data on {name} at log={log}");
+                assert!(bits > 0, "{variant} produced an empty stream for {name}");
+            }
+        }
+    }
+}
+
+/// The four variants share one renormalisation loop, so they must agree on the
+/// encoded size. A mismatch means one of them grew a different state rule.
+#[test]
+fn variants_agree_on_the_encoded_size() {
+    for (name, data) in distributions() {
+        for log in 6..=12u32 {
+            if (1u32 << log) < data.iter().copied().max().unwrap_or(0) + 1 {
+                continue;
+            }
+            let results = all_variants(&data, log);
+            let (_, first_bytes, first_bits, _) = &results[0];
+            for (variant, bytes, bits, _) in &results[1..] {
+                assert_eq!(
+                    bits, first_bits,
+                    "{variant} produced {bits} bits where rans produced {first_bits} on {name} at log={log}"
+                );
+                assert_eq!(
+                    bytes, first_bytes,
+                    "{variant} produced a different byte stream than rans on {name} at log={log}"
+                );
+            }
+        }
+    }
+}
+
+/// The old normalizer forced every alphabet entry to at least one slot, so a
+/// sparse alphabet with a small table drove the rounding loop into an
+/// underflow panic (`attempt to subtract with overflow`).
+#[test]
+fn sparse_alphabet_with_a_small_table_roundtrips() {
+    let data: Vec<u32> = (0..64).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect();
+    for log in 8..=12u32 {
+        for (variant, _, _, decoded) in all_variants(&data, log) {
+            assert_eq!(decoded, data, "{variant} failed on a sparse alphabet");
+        }
+    }
+}
+
+/// `DecodeEntry.symbol` was a `u8`, so any symbol above 255 was silently
+/// truncated and the round-trip produced the wrong data without an error.
+#[test]
+fn variants_handle_symbols_above_255() {
+    let data: Vec<u32> = (0..900).map(|i| (i * 13) % 300).collect();
+    for (variant, _, _, decoded) in all_variants(&data, 12) {
+        assert_eq!(decoded, data, "{variant} truncated a symbol above 255");
+    }
+}
+
+/// `DecodeEntry.new_state` was a `u16`, which overflows once the table has more
+/// than 65536 entries. tANS ignored the field and survived; FSE used it and
+/// corrupted silently.
+#[test]
+fn variants_handle_tables_above_65536_entries() {
+    let data: Vec<u32> = (0..900).map(|i| (i * 13) % 17).collect();
+    for log in [16u32, 17, 20] {
+        for (variant, _, _, decoded) in all_variants(&data, log) {
+            assert_eq!(decoded, data, "{variant} corrupted at log={log}");
+        }
+    }
+}
+
+/// A symbol with frequency 0 made every encoder's renormalisation loop
+/// `while state >= 2 * 0`, which never terminates.
+#[test]
+#[should_panic(expected = "frequency 0")]
+fn encoding_an_absent_symbol_panics_instead_of_hanging() {
+    let table = RansTable::new(&[8, 0, 8], 4);
+    Encoder::new(&table).encode(&table, 1, &mut BitWriter::new());
+}
+
+#[test]
+fn absent_symbols_round_trip_in_every_variant() {
+    // Symbols that never occur must not consume table slots.
+    let data: Vec<u32> = (0..300).map(|i| if i % 4 == 0 { 3 } else { 9 }).collect();
+    for (variant, _, _, decoded) in all_variants(&data, 10) {
+        assert_eq!(decoded, data, "{variant} failed with an absent symbol");
+    }
+}
+
+#[test]
+fn normalization_never_exceeds_the_table_capacity() {
+    // More distinct symbols than slots cannot be represented: it must fail with
+    // a message, not underflow.
+    let counts: Vec<u64> = (1..=300).collect();
+    let result = std::panic::catch_unwind(|| normalize_frequencies(&counts, 256));
+    assert!(result.is_err());
+
+    let freqs = normalize_frequencies(&[1, 1, 1, 1], 256);
+    assert_eq!(freqs, vec![64, 64, 64, 64]);
+}
+
+/// Pins the compression overhead the crate currently achieves, so a future
+/// change to the renormalisation loop cannot quietly make it much worse.
+/// The current state machine pays a per-run rounding cost: uniform data lands
+/// within 0.02% of the entropy, skewed data around 10%.
+#[test]
+fn compression_overhead_stays_bounded() {
+    let cases: Vec<(&str, Vec<u32>, f64, u32)> = vec![
+        (
+            "uniform-256",
+            (0..10000).map(|i| (i % 256) as u32).collect(),
+            8.0,
+            10,
+        ),
+        (
+            "skewed-70-20-10",
+            (0..1000)
+                .map(|i| {
+                    if i < 700 {
+                        0
+                    } else if i < 900 {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .collect(),
+            1.156_748, // entropy of 0.7 / 0.2 / 0.1
+            10,
+        ),
+    ];
+
+    for (name, data, bits_per_symbol, log) in cases {
+        let results = all_variants(&data, log);
+        let (_, _, bits, _) = &results[0];
+        let ideal = bits_per_symbol * data.len() as f64;
+        assert!(
+            *bits as f64 <= ideal * 1.15,
+            "{name}: {bits} bits against an ideal of {ideal:.0} (log={log})"
+        );
+    }
+}
+
+#[test]
+fn a_stream_never_grows_the_input() {
+    // Sanity floor for the encoder: even the worst case tested stays below the
+    // raw 4-byte-per-symbol representation.
+    for (name, data) in distributions() {
+        let results = all_variants(&data, 10);
+        let (_, _, bits, decoded) = &results[0];
+        assert_eq!(decoded, &data, "{name}");
+        assert!(
+            *bits <= data.len() * 32 + 64,
+            "{name} emitted {bits} bits for {} symbols",
+            data.len()
+        );
+    }
+}

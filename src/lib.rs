@@ -19,8 +19,7 @@ pub use table_ans::{
     TableEncoder,
 };
 pub use tans_full::{
-    tans_decode, tans_decode_all, tans_encode, tans_encode_all, EncodeEntry, TansDecoder,
-    TansEncoder, TansTable,
+    tans_decode, tans_decode_all, tans_encode, tans_encode_all, TansDecoder, TansEncoder, TansTable,
 };
 
 pub fn encode(data: &[u32], log: u32) -> (RansTable, Vec<u8>, usize) {
@@ -94,16 +93,9 @@ mod tests {
 
     #[test]
     fn compress() {
-        let mut d = Vec::new();
-        for _ in 0..700 {
-            d.push(0);
-        }
-        for _ in 0..200 {
-            d.push(1);
-        }
-        for _ in 0..100 {
-            d.push(2);
-        }
+        let mut d = vec![0u32; 700];
+        d.extend(std::iter::repeat_n(1u32, 200));
+        d.extend(std::iter::repeat_n(2u32, 100));
         let (t, b, n) = encode(&d, 10);
         assert_eq!(decode(&t, &b, n, d.len()), d);
         assert!(n < d.len() * 8);

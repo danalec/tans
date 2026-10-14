@@ -13,34 +13,18 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode(&mut self, reader: &mut BitReader) -> u32 {
-        #[cfg(test)]
-        println!(
-            "decode: state={}, slot={}",
-            self.state,
-            self.state & (self.table.table_size - 1)
-        );
-
         let slot = self.state & (self.table.table_size - 1);
-
         let sym = self.table.find_symbol(slot);
-        #[cfg(test)]
-        println!("  found symbol {} for slot {}", sym, slot);
 
-        let f = self.table.frequencies[sym as usize];
+        let freq = self.table.frequencies[sym as usize];
         let start = self.table.cumul[sym as usize];
-        let scale_bits = self.table.log2_table_size;
-        let mask = self.table.table_size - 1;
 
-        self.state = f * (self.state >> scale_bits) + (self.state & mask) - start;
-        #[cfg(test)]
-        println!("  new state before renorm: {}", self.state);
+        self.state = freq * (self.state >> self.table.log2_table_size) + slot - start;
 
         while self.state < self.table.table_size {
             let bit = reader.read(1);
             self.state = (self.state << 1) | bit;
         }
-        #[cfg(test)]
-        println!("  state after renorm: {}", self.state);
 
         sym
     }

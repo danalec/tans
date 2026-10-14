@@ -129,6 +129,71 @@ fn bench_table_decode(c: &mut Criterion) {
     });
 }
 
+fn bench_tans_encode(c: &mut Criterion) {
+    let data: Vec<u32> = (0..1000).map(|i| i % 16).collect();
+    let (table, _, _) = tans::tans_encode(&data, 10);
+
+    c.bench_function("tans_encode_1k", |b| {
+        b.iter(|| tans::tans_encode_all(&table, &data))
+    });
+}
+
+fn bench_tans_decode(c: &mut Criterion) {
+    let data: Vec<u32> = (0..1000).map(|i| i % 16).collect();
+    let (table, encoded, bits) = tans::tans_encode(&data, 10);
+
+    c.bench_function("tans_decode_1k", |b| {
+        b.iter(|| tans::tans_decode(&table, &encoded, bits, data.len()))
+    });
+}
+
+fn bench_fse_encode(c: &mut Criterion) {
+    let data: Vec<u32> = (0..1000).map(|i| i % 16).collect();
+    let (table, _, _) = tans::fse_encode(&data, 10);
+
+    c.bench_function("fse_encode_1k", |b| {
+        b.iter(|| tans::fse_encode_all(&table, &data))
+    });
+}
+
+fn bench_fse_decode(c: &mut Criterion) {
+    let data: Vec<u32> = (0..1000).map(|i| i % 16).collect();
+    let (table, encoded, bits) = tans::fse_encode(&data, 10);
+
+    c.bench_function("fse_decode_1k", |b| {
+        b.iter(|| tans::fse_decode(&table, &encoded, bits, data.len()))
+    });
+}
+
+fn bench_bitstream_write(c: &mut Criterion) {
+    let mut values = BitWriter::new();
+    for i in 0..1024u32 {
+        values.write(i.wrapping_mul(2_654_435_761), 12);
+    }
+    let (bytes, bits) = values.finish();
+
+    c.bench_function("bitstream_write_12k", |b| {
+        b.iter(|| {
+            let mut w = BitWriter::new();
+            for i in 0..1024u32 {
+                w.write(i.wrapping_mul(2_654_435_761), 12);
+            }
+            w.finish()
+        })
+    });
+
+    c.bench_function("bitstream_read_12k", |b| {
+        b.iter(|| {
+            let mut r = tans::BitReader::from_bytes(&bytes, bits);
+            let mut acc = 0u32;
+            for _ in 0..1024 {
+                acc = acc.wrapping_add(r.read(12));
+            }
+            black_box(acc)
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_encode_small,
@@ -141,6 +206,11 @@ criterion_group!(
     bench_encode_all_api,
     bench_table_encode,
     bench_table_decode,
+    bench_tans_encode,
+    bench_tans_decode,
+    bench_fse_encode,
+    bench_fse_decode,
+    bench_bitstream_write,
 );
 
 criterion_main!(benches);

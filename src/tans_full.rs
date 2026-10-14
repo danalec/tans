@@ -1,5 +1,5 @@
 use crate::bitstream::{BitReader, BitWriter};
-use crate::rans_table::normalize_frequencies;
+use crate::rans_table::{normalize_frequencies, MAX_TABLE_LOG};
 
 #[derive(Debug, Clone)]
 pub struct TansTable {
@@ -8,35 +8,35 @@ pub struct TansTable {
     pub frequencies: Vec<u32>,
     pub cumul: Vec<u32>,
     pub decode_table: Vec<DecodeEntry>,
-    pub encode_table: Vec<EncodeEntry>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct DecodeEntry {
-    pub symbol: u8,
+    pub symbol: u32,
     pub nb_bits: u8,
-    pub new_state: u16,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct EncodeEntry {
-    pub nb_bits: u8,
-    pub new_state: u16,
+    pub new_state: u32,
 }
 
 impl TansTable {
     pub fn new(freqs: &[u32], table_log: u32) -> Self {
+        assert!(
+            table_log <= MAX_TABLE_LOG,
+            "table_log must be <= {MAX_TABLE_LOG} (got {table_log})"
+        );
         let table_size = 1u32 << table_log;
-        assert_eq!(freqs.iter().sum::<u32>(), table_size);
-        assert!(freqs.iter().all(|&f| f > 0));
+        assert_eq!(
+            freqs.iter().sum::<u32>(),
+            table_size,
+            "frequencies must sum to the table size ({table_size})"
+        );
 
         let mut cumul = vec![0u32];
         for &f in freqs {
             cumul.push(cumul.last().unwrap() + f);
         }
 
-        let (decode_table, encode_table) = Self::build_tables(freqs, &cumul, table_log);
+        let decode_table = Self::build_decode_table(freqs, &cumul, table_log);
 
         Self {
             table_size,
@@ -44,12 +44,11 @@ impl TansTable {
             frequencies: freqs.to_vec(),
             cumul,
             decode_table,
-            encode_table,
         }
     }
 
     pub fn from_data(data: &[u32], table_log: u32) -> Self {
-        assert!(!data.is_empty());
+        assert!(!data.is_empty(), "cannot build a table from an empty input");
         let max_sym = *data.iter().max().unwrap() as usize;
         let n_symbols = max_sym + 1;
 
@@ -63,63 +62,32 @@ impl TansTable {
         Self::new(&freqs, table_log)
     }
 
-    fn build_tables(
-        freqs: &[u32],
-        cumul: &[u32],
-        table_log: u32,
-    ) -> (Vec<DecodeEntry>, Vec<EncodeEntry>) {
+    /// One entry per table slot: which symbol lives there, how many bits the
+    /// decoder has to pull for the previous state, and where that state starts.
+    fn build_decode_table(freqs: &[u32], cumul: &[u32], table_log: u32) -> Vec<DecodeEntry> {
         let table_size = 1u32 << table_log;
-
-        let mut decode_table: Vec<DecodeEntry> = vec![
-            DecodeEntry {
-                symbol: 0,
-                nb_bits: 0,
-                new_state: 0,
-            };
-            table_size as usize
-        ];
-
-        let total_entries: usize = freqs.iter().map(|&f| f as usize).sum();
-        let mut encode_table: Vec<EncodeEntry> = vec![
-            EncodeEntry {
-                nb_bits: 0,
-                new_state: 0,
-            };
-            total_entries
-        ];
+        let mut decode_table = vec![DecodeEntry::default(); table_size as usize];
 
         for (sym, &freq) in freqs.iter().enumerate() {
-            let base = cumul[sym];
             for i in 0..freq {
+                // `next_state` is the encoder state this slot decodes back to.
                 let next_state = freq + i;
-                let ilog2_next = if next_state > 0 {
-                    31u32 - next_state.leading_zeros()
-                } else {
-                    0
-                };
                 let nb_bits = if next_state < table_size {
-                    table_log.saturating_sub(ilog2_next)
+                    table_log - (31 - next_state.leading_zeros())
                 } else {
                     0
                 };
-
                 let new_state = (next_state << nb_bits) - table_size;
 
-                let pos = (base + i) as usize;
-                decode_table[pos] = DecodeEntry {
-                    symbol: sym as u8,
+                decode_table[(cumul[sym] + i) as usize] = DecodeEntry {
+                    symbol: sym as u32,
                     nb_bits: nb_bits as u8,
-                    new_state: new_state as u16,
-                };
-
-                encode_table[pos] = EncodeEntry {
-                    nb_bits: nb_bits as u8,
-                    new_state: new_state as u16,
+                    new_state,
                 };
             }
         }
 
-        (decode_table, encode_table)
+        decode_table
     }
 }
 
@@ -138,6 +106,10 @@ impl<'a> TansEncoder<'a> {
 
     pub fn encode(&mut self, sym: u32, writer: &mut BitWriter) {
         let freq = self.table.frequencies[sym as usize];
+        assert!(
+            freq > 0,
+            "symbol {sym} has frequency 0 and cannot be encoded"
+        );
         let cumul = self.table.cumul[sym as usize];
 
         while self.state >= freq * 2 {
@@ -181,18 +153,11 @@ impl<'a> TansDecoder<'a> {
         let slot = self.state & (self.table.table_size - 1);
         let entry = self.table.decode_table[slot as usize];
 
-        let symbol = entry.symbol as u32;
-        let freq = self.table.frequencies[symbol as usize];
-        let cumul = self.table.cumul[symbol as usize];
+        // `new_state` is the previous state minus the table size, so restoring it
+        // is one table lookup plus one multi-bit read.
+        self.state = entry.new_state + self.table.table_size + reader.read(entry.nb_bits as u32);
 
-        self.state = freq + (slot - cumul);
-
-        while self.state < self.table.table_size {
-            let bit = reader.read(1);
-            self.state = (self.state << 1) | bit;
-        }
-
-        symbol
+        entry.symbol
     }
 }
 
@@ -223,7 +188,6 @@ mod tests {
 
         assert_eq!(table.table_size, 16);
         assert_eq!(table.decode_table.len(), 16);
-        assert_eq!(table.encode_table.len(), 16);
     }
 
     #[test]
@@ -265,17 +229,36 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_across_table_sizes() {
+        let data: Vec<u32> = (0..400).map(|i| (i * 7) % 5).collect();
+        for log in 4..=12u32 {
+            let (table, encoded, bits) = tans_encode(&data, log);
+            let decoded = tans_decode(&table, &encoded, bits, data.len());
+            assert_eq!(decoded, data, "table_log = {log}");
+        }
+    }
+
+    #[test]
+    fn roundtrip_with_symbols_above_255() {
+        let data: Vec<u32> = (0..900).map(|i| (i * 13) % 300).collect();
+        let (table, encoded, bits) = tans_encode(&data, 12);
+        let decoded = tans_decode(&table, &encoded, bits, data.len());
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn roundtrip_with_a_table_larger_than_65536_entries() {
+        let data: Vec<u32> = (0..900).map(|i| (i * 13) % 17).collect();
+        let (table, encoded, bits) = tans_encode(&data, 20);
+        let decoded = tans_decode(&table, &encoded, bits, data.len());
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
     fn compression_effectiveness() {
-        let mut data = Vec::new();
-        for _ in 0..700 {
-            data.push(0);
-        }
-        for _ in 0..200 {
-            data.push(1);
-        }
-        for _ in 0..100 {
-            data.push(2);
-        }
+        let mut data = vec![0u32; 700];
+        data.extend(std::iter::repeat_n(1u32, 200));
+        data.extend(std::iter::repeat_n(2u32, 100));
 
         let (table, encoded, bits) = tans_encode(&data, 10);
         let decoded = tans_decode(&table, &encoded, bits, data.len());
@@ -284,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_table_correctness() {
+    fn decode_table_covers_every_slot() {
         let freqs = vec![8u32, 8];
         let table = TansTable::new(&freqs, 4);
 
@@ -293,6 +276,22 @@ mod tests {
             symbol_counts[entry.symbol as usize] += 1;
         }
         assert_eq!(symbol_counts, vec![8, 8]);
+    }
+
+    #[test]
+    fn decode_table_restores_a_state_inside_the_invariant() {
+        // Every entry must rebuild a previous state in [L, 2L).
+        let freqs = vec![10u32, 5, 1];
+        let table = TansTable::new(&freqs, 4);
+        for entry in &table.decode_table {
+            let lowest = entry.new_state + table.table_size;
+            let highest = lowest + (1u32 << entry.nb_bits) - 1;
+            assert!(lowest >= table.table_size);
+            assert!(
+                highest < table.table_size * 2,
+                "entry {entry:?} can leave the state range"
+            );
+        }
     }
 
     #[test]
@@ -315,5 +314,21 @@ mod tests {
         let (table, encoded, bits) = tans_encode(&data, 8);
         let decoded = tans_decode(&table, &encoded, bits, data.len());
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn absent_symbols_keep_their_slot_free() {
+        let freqs = vec![12u32, 0, 4];
+        let table = TansTable::new(&freqs, 4);
+        assert_eq!(table.decode_table.len(), 16);
+        assert!(table.decode_table.iter().all(|e| e.symbol != 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "frequency 0")]
+    fn encoding_an_absent_symbol_fails_instead_of_hanging() {
+        let table = TansTable::new(&[12, 0, 4], 4);
+        let mut encoder = TansEncoder::new(&table);
+        encoder.encode(1, &mut BitWriter::new());
     }
 }

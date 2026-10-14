@@ -1,5 +1,5 @@
 use crate::bitstream::BitWriter;
-use crate::rans_table::RansTable;
+use crate::rans_table::{RansTable, MAX_TABLE_LOG};
 
 pub struct Encoder {
     state: u32,
@@ -13,36 +13,31 @@ impl Encoder {
     }
 
     pub fn encode(&mut self, table: &RansTable, sym: u32, writer: &mut BitWriter) {
-        #[cfg(test)]
-        println!("encode: state={}, symbol={}", self.state, sym);
+        let freq = *table.frequencies.get(sym as usize).unwrap_or_else(|| {
+            panic!(
+                "symbol {sym} is outside the table alphabet of {}",
+                table.frequencies.len()
+            )
+        });
+        assert!(
+            freq > 0,
+            "symbol {sym} has frequency 0 and cannot be encoded"
+        );
 
-        let f = table.frequencies[sym as usize];
-        let scale_bits = table.log2_table_size;
-
-        let x_max = f << 1;
-
+        // Renormalize down to [freq, 2*freq) so the next step cannot overflow.
+        let x_max = freq << 1;
         while self.state >= x_max {
             writer.write(self.state & 1, 1);
-            #[cfg(test)]
-            println!("  wrote bit {}", self.state & 1);
             self.state >>= 1;
         }
 
-        #[cfg(test)]
-        println!("  after renorm, state={}", self.state);
-
         let start = table.cumul[sym as usize];
-        let q = self.state / f;
-        let r = self.state % f;
-        self.state = (q << scale_bits) + r + start;
-
-        #[cfg(test)]
-        println!("  after encode, state={}", self.state);
+        let q = self.state / freq;
+        let r = self.state % freq;
+        self.state = (q << table.log2_table_size) + r + start;
     }
 
     pub fn finish(&self, table: &RansTable, writer: &mut BitWriter) {
-        #[cfg(test)]
-        println!("flush: final state={}", self.state);
         writer.write(self.state, table.log2_table_size + 1);
     }
 }
@@ -62,6 +57,9 @@ pub fn encode_all(table: &RansTable, data: &[u32]) -> (Vec<u8>, usize) {
 pub struct Config {
     pub log: u32,
 }
+
+/// Twelve bits of table precision: the crate's documented sweet spot for
+/// byte-sized alphabets.
 impl Default for Config {
     fn default() -> Self {
         Self { log: 12 }
@@ -69,7 +67,13 @@ impl Default for Config {
 }
 
 pub fn encode_with_stats(data: &[u32], cfg: Config) -> (RansTable, Vec<u8>, usize) {
-    assert!(!data.is_empty());
+    assert!(!data.is_empty(), "cannot build a table from an empty input");
+    assert!(
+        cfg.log <= MAX_TABLE_LOG,
+        "table_log must be <= {MAX_TABLE_LOG} (got {})",
+        cfg.log
+    );
+
     let max_sym = *data.iter().max().unwrap();
     let n = (max_sym + 1) as usize;
 
