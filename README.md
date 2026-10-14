@@ -1,5 +1,7 @@
 # tANS/FSE: Entropy Coding Implementation
 
+[![CI](https://github.com/danalec/tans/actions/workflows/ci.yml/badge.svg)](https://github.com/danalec/tans/actions/workflows/ci.yml)
+
 A high-performance Rust implementation of **table Asymmetric Numeral Systems (tANS)** and **Finite State Entropy (FSE)** codecs, providing near-optimal compression with Huffman-like decoding speeds.
 
 ## Overview
@@ -85,14 +87,32 @@ let decoded: Vec<u32> = decoder.decode_all(data.len());
 
 ## Performance Characteristics
 
-| Table Size (L) | Memory | Precision | Speed |
-|----------------|--------|-----------|-------|
-| 2^8 = 256 | 256 B | Poor | Very fast |
-| 2^12 = 4096 | 4 KB | Good | Fast (L1 cache) |
-| 2^16 = 65536 | 64 KB | Excellent | Medium |
-| 2^20+ | >1 MB | Near-optimal | Slower (cache misses) |
+| Table Size (L) | Memory per table | Precision | Speed |
+|----------------|------------------|-----------|-------|
+| 2^8 = 256 | 1 KB | Poor | Very fast |
+| 2^12 = 4096 | 16 KB | Good | Fast (L1 cache) |
+| 2^16 = 65536 | 256 KB | Excellent | Medium |
+| 2^20+ | >4 MB | Near-optimal | Slower (cache misses) |
 
-**Recommended**: L = 2^12 (4096 entries) for 256-symbol alphabets — fits in L1 cache while providing good precision.
+`RansTable`/`StateTable` store one `u32` per slot; `FseTable`/`TansTable` store a
+12-byte `DecodeEntry`. **Recommended**: L = 2^12 (4096 entries) for 256-symbol
+alphabets — 16 KB keeps the hot table in L1 while providing good precision.
+
+### Measured overhead over the Shannon entropy
+
+Averaged over 12 orderings of the same multiset, so the number reflects the
+codec rather than one lucky or unlucky arrangement:
+
+| Input | Symbols | Entropy | Encoded (mean) | Overhead | Range over orderings |
+|-------|---------|---------|----------------|----------|----------------------|
+| Uniform, 256 symbols | 10 000 | 80 000 bits | 80 011 bits | +0.01% | identical for every ordering |
+| 1/3 vs 2/3 | 10 000 | 9 184 bits | 10 011 bits | +9.01% | identical for every ordering |
+| 70 / 20 / 10 | 1 000 | 1 157 bits | 1 180 bits | +2.04% | −4.65% … +10.91% |
+
+Raising `table_log` does not change the gap — it is not state granularity. The
+70/20/10 row has a wide spread because this state machine is not a complete
+code (§8.6): some orderings of the same data encode *below* the entropy, others
+well above it, and only the mean is meaningful. See §8.6.
 
 ## Benchmarks
 
@@ -107,6 +127,21 @@ cargo bench
 # Technical Guide: tANS/FSE Theory and Implementation
 
 This section provides a comprehensive explanation of the algorithms, theory, and implementation details.
+
+> **What the crate actually implements.** All four variants
+> (`Encoder`/`Decoder`, `TableEncoder`/`TableDecoder`,
+> `TansEncoder`/`TansDecoder`, `FseEncoder`/`FseDecoder`) run the *same*
+> rANS-style state update: renormalize before coding, land the state in
+> `[L, 2L)`, and rebuild the previous state by appending the bits the encoder
+> shifted out. They differ only in where the symbol lookup comes from — a
+> cumulative-frequency scan, a slot table, or a decode table. A test asserts
+> they produce identical bytes, so they are interchangeable.
+>
+> Sections 4.1 and 4.4 describe the FSE step-function spread, 6.3 describes
+> interleaved states, and 8.2–8.4 describe alias tables, SIMD and cache-aware
+> layouts. None of those ship here, and §8.6 records that the spread and
+> interleaving were measured and made compression *worse*, not better. Treat
+> those sections as background on the family, not as a description of the code.
 
 ## Table of Contents
 
@@ -269,11 +304,14 @@ DecodeResult decode(uint32_t x) {
 The decoder behavior is fully determined by state, making it tableable:
 
 ```cpp
+// Widths are a correctness contract, not a packing choice. `symbol` must hold
+// the whole alphabet and `newState` every reachable state; narrowing either one
+// truncates silently instead of failing at the boundary.
 struct DecodeTableEntry {
-    uint8_t symbol;        // decoded symbol
-    uint8_t nbBits;        // bits to read for renormalization
-    uint16_t newState;     // base state after normalization
-};
+    uint32_t symbol;       // decoded symbol: the alphabet is not bounded by 255
+    uint8_t  nbBits;       // bits to read for renormalization
+    uint32_t newState;     // base state after normalization
+};  // 12 bytes per entry
 
 // Decoding loop
 DecodeTableEntry entry = decodeTable[state & (L - 1)];
@@ -553,22 +591,30 @@ for (int i = N-1; i >= 0; i--) {
 
 ### 6.2 Flush and Initialization
 
+The encoder's state always lives in `[L, 2L)`, which needs `log2L + 1` bits. Both
+variants below are equivalent — pick one and use it on both sides:
+
 ```cpp
-// Encoder flush: write final state
+// Option A (what this crate does): write the full state, read it back as-is.
 void flush(uint32_t state, BitWriter& writer) {
-    uint32_t finalBits = log2L + 1;  // enough for [L, 2L-1]
-    writer.write(state - L, finalBits);  // NOT full state!
-    writer.flush();
+    writer.write(state, log2L + 1);
+}
+uint32_t init(BitReader& reader) {
+    return reader.read(log2L + 1);   // already in [L, 2L)
 }
 
-// Decoder init: read final state from bitstream end
+// Option B: write the offset from L, read it back and add L.
+void flush(uint32_t state, BitWriter& writer) {
+    writer.write(state - L, log2L + 1);
+}
 uint32_t init(BitReader& reader) {
-    uint32_t finalBits = log2L + 1;
-    return L + reader.read_from_end(finalBits);
+    return L + reader.read(log2L + 1);
 }
 ```
 
-**Common mistake**: Writing full state instead of `state - L` causes off-by-L error.
+**Common mistake**: pairing option A's flush with option B's init (or vice
+versa) shifts every state by L. Because `state - L < L` fits in `log2L` bits,
+both are safe as long as the reader adds back exactly what the writer removed.
 
 ### 6.3 Interleaved Multi-State ANS
 
@@ -620,34 +666,46 @@ See Alverson's "Integer Division Using Reciprocals" for magic constant derivatio
 
 ### 6.5 Bitstream Implementation
 
+Bits are packed least-significant-first into a 64-bit accumulator and drained a
+byte at a time; reading walks the same bits back in reverse write order.
+
 ```rust
 pub struct BitWriter {
-    buffer: Vec<u8>,
-    current: u64,
-    bits_in_current: u32,
+    acc: u64,      // bits not yet drained into `bytes`
+    acc_bits: u32, // how many bits of `acc` are live (always < 8 after a write)
+    bytes: Vec<u8>,
 }
 
 impl BitWriter {
     pub fn write(&mut self, value: u32, nbits: u32) {
-        self.current |= (value as u64) << self.bits_in_current;
-        self.bits_in_current += nbits;
-        
-        while self.bits_in_current >= 8 {
-            self.buffer.push((self.current & 0xFF) as u8);
-            self.current >>= 8;
-            self.bits_in_current -= 8;
+        assert!(nbits <= 32);
+        if nbits == 0 {
+            return;
+        }
+        self.acc |= (value as u64) << self.acc_bits;
+        self.acc_bits += nbits;
+
+        while self.acc_bits >= 8 {
+            self.bytes.push(self.acc as u8);
+            self.acc >>= 8;
+            self.acc_bits -= 8;
         }
     }
-    
-    pub fn finish(&mut self) -> (Vec<u8>, u32) {
-        if self.bits_in_current > 0 {
-            self.buffer.push((self.current & 0xFF) as u8);
+
+    pub fn finish(mut self) -> (Vec<u8>, usize) {
+        let total_bits = self.bytes.len() * 8 + self.acc_bits as usize;
+        if self.acc_bits > 0 {
+            self.bytes.push(self.acc as u8);
         }
-        let total_bits = (self.buffer.len() as u32 - 1) * 8 + self.bits_in_current;
-        (self.buffer.clone(), total_bits)
+        (self.bytes, total_bits)
     }
 }
 ```
+
+`BitReader` reinterprets the buffer as little-endian `u64` words, so a read of up
+to 32 bits never touches more than two words regardless of alignment. `acc_bits`
+stays below 8 after every write, which is what keeps `value << acc_bits` inside 64
+bits for a 32-bit value.
 
 ---
 
@@ -662,6 +720,14 @@ impl BitWriter {
 | Correct for short inputs, wrong for long | Buffer boundary mishandled |
 | All decodes wrong, seemingly random | Table spread mismatch |
 | Every Nth symbol wrong (N=interleave) | Multi-state flush/init order wrong |
+| Round-trip fails only past 256 symbols | Decode entry `symbol` field too narrow |
+| Round-trip fails only at `log >= 17` | Decode entry `new_state` field too narrow |
+| Suite hangs instead of failing | Encoding a symbol whose frequency is 0 |
+| Decodes fine but ratio far from entropy | Check the ordering: the code is incomplete (§8.6) |
+
+The last three are silent by construction: none of them produces an error, they
+produce wrong bytes or no bytes at all. Type widths and the frequency-0 case are
+covered by `tests/regression_tests.rs`.
 
 ### 7.2 Normalization Direction Bug
 
@@ -797,14 +863,19 @@ zstd and Oodle use 4-8 interleaved states for modern CPU optimization.
 ### 8.4 Cache-Aware Design
 
 ```cpp
-// Pack decode entry tightly for cache efficiency
-struct CompactEntry {
-    uint8_t symbol;
-    uint8_t nbBits;      // only 0-8 range needed
-    uint16_t newState;   // packed
-};  // 4 bytes per entry
+// Pack the decode entry for cache efficiency, but never below the widths the
+// data needs. A 4-byte entry (uint8 symbol + uint8 nbBits + uint16 newState)
+// looks attractive and is wrong twice: it caps the alphabet at 255 symbols and
+// overflows newState once the table passes 65536 entries, both without an
+// error. The crate uses 12 bytes and asserts on table_log instead.
+struct Entry {
+    uint32_t symbol;
+    uint8_t  nbBits;
+    uint32_t newState;
+};  // 12 bytes per entry
 
-// 4096 entries × 4 bytes = 16KB, fits comfortably in L1
+// 4096 entries x 12 bytes = 48KB, which is why 2^10..2^12 is the sweet spot
+// before the table starts spilling L1.
 ```
 
 ### 8.5 Branch Prediction Optimization
@@ -822,6 +893,51 @@ loop {
     if output.len() >= count { break; }
 }
 ```
+
+### 8.6 The Code Is Not Complete: Compression Trades Variance, Not Average
+
+The decoder reconstructs the previous state as:
+
+```
+x     = freq + (slot - cumul)        // in [freq, 2*freq)
+nb    = log2L - floor(log2(x))
+prev  = (x << nb) | read(nb)         // in [L, 2L)
+```
+
+`x` is fully determined by the slot, `nb` is fully determined by `x`, and the
+bits the encoder emits are forced: it writes the low `nb` bits of the state it
+already holds. The only choice is how many shifts to make, and the decoder
+re-derives the same count, so the transition has no degrees of freedom.
+
+That makes the code **incomplete**: for a fixed symbol the encoder maps `L`
+possible states onto only `freq` possible new states, and the collapsed states
+are told apart by the bits written rather than by the state. The total number of
+bit patterns still balances, but individual inputs do not. Encoding 1000 symbols
+of 70/20/10 data in twelve different orderings gives sizes from 1103 to 1283
+bits — some orderings land 4.7% *below* the Shannon entropy of the input, which
+no complete code can do, and others land 10.9% above it. The mean is +2.04%.
+
+An earlier revision of this guide blamed long symbol runs for a flat ~10%
+penalty. That is wrong: a round-robin ordering, which has no long runs at all,
+produces the same 1283 bits as three solid runs. What matters is the arrangement
+the state happens to be in, not the run lengths.
+
+#### Interventions that were tried and did not help
+
+| Change | 70/20/10 result |
+|--------|-----------------|
+| FSE state convention (decoder state in `[0, L)`, fixed `nb_bits`) | 1282 bits |
+| FSE's step-function table spread | 1301 bits |
+| Renormalize to the state that maximizes `log2(y/x)` instead of the minimum shift | 1282 bits |
+| Search all 1024 legal initial states | 1283 bits (the current one already wins) |
+| Interleaved states, N = 2 / 4 / 8 | 1294 / 1316 / 1356 bits |
+
+None of them improves on the current transition, which is why the crate ships
+one state machine rather than four. The uniform-alphabet result (+0.01%) shows
+the transition itself is sound; what remains is the incompleteness above, and
+closing it properly needs a *complete* code, which is a different design
+(arithmetic coding, or a tANS variant with an encoding table and a per-symbol
+encodable-state search) rather than a tweak to this one.
 
 ---
 

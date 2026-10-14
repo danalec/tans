@@ -1,5 +1,5 @@
 use crate::bitstream::{BitReader, BitWriter};
-use crate::rans_table::normalize_frequencies;
+use crate::rans_table::{normalize_frequencies, MAX_TABLE_LOG};
 
 #[derive(Debug, Clone)]
 pub struct StateTable {
@@ -12,8 +12,16 @@ pub struct StateTable {
 
 impl StateTable {
     pub fn new(freqs: &[u32], table_log: u32) -> Self {
+        assert!(
+            table_log <= MAX_TABLE_LOG,
+            "table_log must be <= {MAX_TABLE_LOG} (got {table_log})"
+        );
         let table_size = 1u32 << table_log;
-        assert_eq!(freqs.iter().sum::<u32>(), table_size);
+        assert_eq!(
+            freqs.iter().sum::<u32>(),
+            table_size,
+            "frequencies must sum to the table size ({table_size})"
+        );
 
         let mut cumul = vec![0u32];
         for &f in freqs {
@@ -80,6 +88,10 @@ impl<'a> TableEncoder<'a> {
 
     pub fn encode(&mut self, sym: u32, writer: &mut BitWriter) {
         let freq = self.table.frequencies[sym as usize];
+        assert!(
+            freq > 0,
+            "symbol {sym} has frequency 0 and cannot be encoded"
+        );
         let cumul = self.table.cumul[sym as usize];
         let scale_bits = self.table.log2_table_size;
 
@@ -124,7 +136,8 @@ impl<'a> TableDecoder<'a> {
     }
 
     pub fn decode(&mut self, reader: &mut BitReader) -> u32 {
-        let slot = self.state & (self.table.table_size - 1);
+        let table_size = self.table.table_size;
+        let slot = self.state & (table_size - 1);
         let sym = self.table.find_symbol(slot);
 
         let freq = self.table.frequencies[sym as usize];
@@ -133,9 +146,11 @@ impl<'a> TableDecoder<'a> {
 
         self.state = freq * (self.state >> scale_bits) + slot - cumul;
 
-        while self.state < self.table.table_size {
-            let bit = reader.read(1);
-            self.state = (self.state << 1) | bit;
+        // One multi-bit read replaces the bit-at-a-time renormalization loop.
+        if self.state < table_size {
+            assert!(self.state > 0, "decoded a zero state from a corrupt stream");
+            let needed = scale_bits - (31 - self.state.leading_zeros());
+            self.state = (self.state << needed) | reader.read(needed);
         }
 
         sym
@@ -211,16 +226,9 @@ mod tests {
 
     #[test]
     fn compression_effectiveness() {
-        let mut data = Vec::new();
-        for _ in 0..700 {
-            data.push(0);
-        }
-        for _ in 0..200 {
-            data.push(1);
-        }
-        for _ in 0..100 {
-            data.push(2);
-        }
+        let mut data = vec![0u32; 700];
+        data.extend(std::iter::repeat_n(1u32, 200));
+        data.extend(std::iter::repeat_n(2u32, 100));
 
         let (table, encoded, bits) = table_encode(&data, 10);
         let decoded = table_decode(&table, &encoded, bits, data.len());

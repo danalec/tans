@@ -26,13 +26,8 @@ fn test_two_symbols_fifty_fifty() {
 
 #[test]
 fn test_highly_skewed_distribution() {
-    let mut data = Vec::new();
-    for _ in 0..90 {
-        data.push(0);
-    }
-    for _ in 0..9 {
-        data.push(1);
-    }
+    let mut data = vec![0u32; 90];
+    data.extend(std::iter::repeat_n(1u32, 9));
     data.push(2);
     let (table, encoded, bits) = encode(&data, 8);
     let decoded = decode(&table, &encoded, bits, data.len());
@@ -52,6 +47,12 @@ fn test_large_alphabet() {
 
 #[test]
 fn test_empty_input() {
+    // The premise: a non-empty input encodes fine, so the failure below is
+    // specifically about the empty input and not a broken table path.
+    let ok = vec![0u32, 1, 0, 1];
+    let (t, b, n) = encode(&ok, 4);
+    assert_eq!(decode(&t, &b, n, ok.len()), ok);
+
     let data: Vec<u32> = vec![];
     let result = std::panic::catch_unwind(|| encode(&data, 4));
     assert!(result.is_err());
@@ -59,16 +60,9 @@ fn test_empty_input() {
 
 #[test]
 fn test_compression_effectiveness() {
-    let mut data = Vec::new();
-    for _ in 0..700 {
-        data.push(0);
-    }
-    for _ in 0..200 {
-        data.push(1);
-    }
-    for _ in 0..100 {
-        data.push(2);
-    }
+    let mut data = vec![0u32; 700];
+    data.extend(std::iter::repeat_n(1u32, 200));
+    data.extend(std::iter::repeat_n(2u32, 100));
     let (table, encoded, bits) = encode(&data, 10);
     let decoded = decode(&table, &encoded, bits, data.len());
     assert_eq!(decoded, data);

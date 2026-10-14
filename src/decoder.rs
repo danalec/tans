@@ -13,34 +13,23 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode(&mut self, reader: &mut BitReader) -> u32 {
-        #[cfg(test)]
-        println!(
-            "decode: state={}, slot={}",
-            self.state,
-            self.state & (self.table.table_size - 1)
-        );
-
-        let slot = self.state & (self.table.table_size - 1);
-
+        let table_size = self.table.table_size;
+        let slot = self.state & (table_size - 1);
         let sym = self.table.find_symbol(slot);
-        #[cfg(test)]
-        println!("  found symbol {} for slot {}", sym, slot);
 
-        let f = self.table.frequencies[sym as usize];
+        let freq = self.table.frequencies[sym as usize];
         let start = self.table.cumul[sym as usize];
-        let scale_bits = self.table.log2_table_size;
-        let mask = self.table.table_size - 1;
 
-        self.state = f * (self.state >> scale_bits) + (self.state & mask) - start;
-        #[cfg(test)]
-        println!("  new state before renorm: {}", self.state);
+        self.state = freq * (self.state >> self.table.log2_table_size) + slot - start;
 
-        while self.state < self.table.table_size {
-            let bit = reader.read(1);
-            self.state = (self.state << 1) | bit;
+        // Pull the bits the encoder shifted out in one read instead of one bit at
+        // a time: shifting `needed` places is exactly what brings the state back
+        // into [L, 2L).
+        if self.state < table_size {
+            assert!(self.state > 0, "decoded a zero state from a corrupt stream");
+            let needed = self.table.log2_table_size - (31 - self.state.leading_zeros());
+            self.state = (self.state << needed) | reader.read(needed);
         }
-        #[cfg(test)]
-        println!("  state after renorm: {}", self.state);
 
         sym
     }
