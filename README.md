@@ -128,6 +128,21 @@ cargo bench
 
 This section provides a comprehensive explanation of the algorithms, theory, and implementation details.
 
+> **What the crate actually implements.** All four variants
+> (`Encoder`/`Decoder`, `TableEncoder`/`TableDecoder`,
+> `TansEncoder`/`TansDecoder`, `FseEncoder`/`FseDecoder`) run the *same*
+> rANS-style state update: renormalize before coding, land the state in
+> `[L, 2L)`, and rebuild the previous state by appending the bits the encoder
+> shifted out. They differ only in where the symbol lookup comes from — a
+> cumulative-frequency scan, a slot table, or a decode table. A test asserts
+> they produce identical bytes, so they are interchangeable.
+>
+> Sections 4.1 and 4.4 describe the FSE step-function spread, 6.3 describes
+> interleaved states, and 8.2–8.4 describe alias tables, SIMD and cache-aware
+> layouts. None of those ship here, and §8.6 records that the spread and
+> interleaving were measured and made compression *worse*, not better. Treat
+> those sections as background on the family, not as a description of the code.
+
 ## Table of Contents
 
 1. [Introduction to ANS](#1-introduction-to-ans)
@@ -289,11 +304,14 @@ DecodeResult decode(uint32_t x) {
 The decoder behavior is fully determined by state, making it tableable:
 
 ```cpp
+// Widths are a correctness contract, not a packing choice. `symbol` must hold
+// the whole alphabet and `newState` every reachable state; narrowing either one
+// truncates silently instead of failing at the boundary.
 struct DecodeTableEntry {
-    uint8_t symbol;        // decoded symbol
-    uint8_t nbBits;        // bits to read for renormalization
-    uint16_t newState;     // base state after normalization
-};
+    uint32_t symbol;       // decoded symbol: the alphabet is not bounded by 255
+    uint8_t  nbBits;       // bits to read for renormalization
+    uint32_t newState;     // base state after normalization
+};  // 12 bytes per entry
 
 // Decoding loop
 DecodeTableEntry entry = decodeTable[state & (L - 1)];
@@ -845,14 +863,19 @@ zstd and Oodle use 4-8 interleaved states for modern CPU optimization.
 ### 8.4 Cache-Aware Design
 
 ```cpp
-// Pack decode entry tightly for cache efficiency
-struct CompactEntry {
-    uint8_t symbol;
-    uint8_t nbBits;      // only 0-8 range needed
-    uint16_t newState;   // packed
-};  // 4 bytes per entry
+// Pack the decode entry for cache efficiency, but never below the widths the
+// data needs. A 4-byte entry (uint8 symbol + uint8 nbBits + uint16 newState)
+// looks attractive and is wrong twice: it caps the alphabet at 255 symbols and
+// overflows newState once the table passes 65536 entries, both without an
+// error. The crate uses 12 bytes and asserts on table_log instead.
+struct Entry {
+    uint32_t symbol;
+    uint8_t  nbBits;
+    uint32_t newState;
+};  // 12 bytes per entry
 
-// 4096 entries × 4 bytes = 16KB, fits comfortably in L1
+// 4096 entries x 12 bytes = 48KB, which is why 2^10..2^12 is the sweet spot
+// before the table starts spilling L1.
 ```
 
 ### 8.5 Branch Prediction Optimization
