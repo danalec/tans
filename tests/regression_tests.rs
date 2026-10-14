@@ -168,6 +168,51 @@ fn normalization_never_exceeds_the_table_capacity() {
     assert_eq!(freqs, vec![64, 64, 64, 64]);
 }
 
+/// A table log past the supported maximum must fail with a message naming the
+/// limit, not by shifting `1u32 << log` past the width or allocating gigabytes.
+#[test]
+#[should_panic(expected = "table_log must be <= 30")]
+fn rans_rejects_an_oversized_table_log() {
+    let _ = encode(&[0u32, 1, 0, 1], 31);
+}
+
+#[test]
+#[should_panic(expected = "table_log must be <= 30")]
+fn table_tans_rejects_an_oversized_table_log() {
+    let _ = StateTable::new(&[1 << 31, 1 << 31], 31);
+}
+
+#[test]
+#[should_panic(expected = "table_log must be <= 30")]
+fn full_tans_rejects_an_oversized_table_log() {
+    let _ = TansTable::new(&[1 << 31, 1 << 31], 31);
+}
+
+#[test]
+#[should_panic(expected = "table_log must be <= 30")]
+fn fse_rejects_an_oversized_table_log() {
+    let _ = FseTable::new(&[1 << 31, 1 << 31], 31);
+}
+
+#[test]
+fn normalization_handles_degenerate_shapes() {
+    // One symbol taking the whole table.
+    assert_eq!(normalize_frequencies(&[9], 8), vec![8]);
+    // One present symbol among many absent ones keeps every slot.
+    assert_eq!(normalize_frequencies(&[5, 0, 0, 0], 8), vec![8, 0, 0, 0]);
+    // A table with exactly one slot holds exactly one symbol.
+    assert_eq!(normalize_frequencies(&[10, 0], 1), vec![1, 0]);
+    assert!(std::panic::catch_unwind(|| normalize_frequencies(&[4, 6], 1)).is_err());
+    // Empty in, empty out.
+    assert!(normalize_frequencies(&[], 16).is_empty());
+}
+
+#[test]
+#[should_panic(expected = "only has 0 slots")]
+fn normalization_rejects_an_empty_table() {
+    let _ = normalize_frequencies(&[1, 1], 0);
+}
+
 /// Pins the compression the crate currently achieves, so a change to the
 /// renormalization loop cannot quietly make it much worse.
 ///

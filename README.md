@@ -1,5 +1,7 @@
 # tANS/FSE: Entropy Coding Implementation
 
+[![CI](https://github.com/danalec/tans/actions/workflows/ci.yml/badge.svg)](https://github.com/danalec/tans/actions/workflows/ci.yml)
+
 A high-performance Rust implementation of **table Asymmetric Numeral Systems (tANS)** and **Finite State Entropy (FSE)** codecs, providing near-optimal compression with Huffman-like decoding speeds.
 
 ## Overview

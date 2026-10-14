@@ -50,7 +50,8 @@ variant, sharing bitstream I/O and frequency normalization.
 
 - Branch from `master`; never push to it directly
 - Conventional commits (`feat:` / `fix:` / `docs:` / `test:` / `perf:`), subject under 72 chars
-- No CI is configured — run `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test` before opening a PR
+- CI (`.github/workflows/ci.yml`) gates on `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`, and a benchmark build; run the same locally before opening a PR
+- Benchmarks are timing-sensitive and flaky in CI, so `cargo bench` itself never runs there — read numbers on a quiet host
 
 ## Security
 
