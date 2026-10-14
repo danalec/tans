@@ -25,7 +25,14 @@ impl BitWriter {
         if n == 0 {
             return;
         }
-        self.acc |= (val as u64) << self.acc_bits;
+        // Bits above `n` must not enter the accumulator: they would survive the
+        // draining shifts and land in a later byte.
+        let payload = if n == 32 {
+            val as u64
+        } else {
+            (val as u64) & ((1u64 << n) - 1)
+        };
+        self.acc |= payload << self.acc_bits;
         self.acc_bits += n;
         while self.acc_bits >= 8 {
             self.bytes.push(self.acc as u8);

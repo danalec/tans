@@ -65,7 +65,7 @@ pub fn normalize_frequencies(counts: &[u64], target: u32) -> Vec<u32> {
         return vec![];
     }
 
-    let mut present: Vec<usize> = (0..counts.len()).filter(|&i| counts[i] > 0).collect();
+    let present: Vec<usize> = (0..counts.len()).filter(|&i| counts[i] > 0).collect();
     assert!(
         present.len() <= target as usize,
         "alphabet has {} distinct symbols but the table only has {target} slots; raise table_log",
@@ -83,23 +83,42 @@ pub fn normalize_frequencies(counts: &[u64], target: u32) -> Vec<u32> {
 
     let mut freqs = vec![0u32; counts.len()];
     let mut sum: u128 = 0;
+    let mut remainders: Vec<(usize, u128)> = Vec::with_capacity(present.len());
     for &i in &present {
-        // Round half up, then guarantee a slot for every symbol that occurred.
-        let scaled = ((counts[i] as u128 * target_u + total / 2) / total).max(1);
-        freqs[i] = scaled as u32;
-        sum += scaled;
+        // Start from the floor of each exact share, raised to one slot so that
+        // every symbol that occurred is representable. Rounding first and
+        // fixing up afterwards could hand a symbol a second slot it did not
+        // earn, pushing it more than one slot off its share.
+        let exact = counts[i] as u128 * target_u;
+        let floor = (exact / total).max(1);
+        freqs[i] = floor as u32;
+        sum += floor;
+        remainders.push((i, exact % total));
     }
 
-    // Distribute the rounding remainder over the most frequent symbols; the
-    // remainder is always smaller than the number of present symbols.
-    present.sort_by(|&a, &b| counts[b].cmp(&counts[a]));
+    // Hand the leftover slots to the symbols that lost the most fraction. With
+    // floors as the base this guarantees every symbol lands within one slot of
+    // its exact share, rather than up to one and a half.
+    remainders.sort_by_key(|&(_, remainder)| std::cmp::Reverse(remainder));
     let diff = target_u as i64 - sum as i64;
-    let steps = (diff.unsigned_abs() as usize).min(present.len());
-    for &i in present.iter().take(steps) {
-        if diff > 0 {
-            freqs[i] += 1;
-        } else if diff < 0 {
-            freqs[i] -= 1;
+
+    if diff > 0 {
+        let steps = (diff as usize).min(remainders.len());
+        for (i, _) in remainders.iter().take(steps) {
+            freqs[*i] += 1;
+        }
+    } else if diff < 0 {
+        // Only reachable when raising the smallest shares to one slot overflows
+        // the table, which needs a symbol holding more than one slot to give one
+        // up -- a symbol that occurred must never end up with none.
+        let donors: Vec<usize> = remainders
+            .iter()
+            .filter(|(i, _)| freqs[*i] > 1)
+            .map(|(i, _)| *i)
+            .collect();
+        let steps = ((-diff) as usize).min(donors.len());
+        for i in donors.iter().take(steps) {
+            freqs[*i] -= 1;
         }
     }
 
