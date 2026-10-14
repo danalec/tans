@@ -66,25 +66,21 @@ fn bench_table_construction(c: &mut Criterion) {
 }
 
 fn bench_table_construction_large(c: &mut Criterion) {
-    let mut frequencies: Vec<u32> = (0..256)
+    // The frequencies must sum to the table size: 64*36 + 64*16 + 64*8 + 64*4 = 4096.
+    let frequencies: Vec<u32> = (0..256)
         .map(|i| {
             if i < 64 {
-                64
+                36
             } else if i < 128 {
-                32
-            } else if i < 192 {
                 16
-            } else {
+            } else if i < 192 {
                 8
+            } else {
+                4
             }
         })
         .collect();
-    let sum: u32 = frequencies.iter().sum();
-    let target = 4096u32;
-    let diff = target as i32 - sum as i32;
-    if diff != 0 {
-        frequencies[0] = (frequencies[0] as i32 + diff) as u32;
-    }
+    assert_eq!(frequencies.iter().sum::<u32>(), 4096);
 
     c.bench_function("table_construction_large", |b| {
         b.iter(|| RansTable::new(&frequencies, 12))

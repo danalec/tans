@@ -136,7 +136,8 @@ impl<'a> TableDecoder<'a> {
     }
 
     pub fn decode(&mut self, reader: &mut BitReader) -> u32 {
-        let slot = self.state & (self.table.table_size - 1);
+        let table_size = self.table.table_size;
+        let slot = self.state & (table_size - 1);
         let sym = self.table.find_symbol(slot);
 
         let freq = self.table.frequencies[sym as usize];
@@ -145,9 +146,11 @@ impl<'a> TableDecoder<'a> {
 
         self.state = freq * (self.state >> scale_bits) + slot - cumul;
 
-        while self.state < self.table.table_size {
-            let bit = reader.read(1);
-            self.state = (self.state << 1) | bit;
+        // One multi-bit read replaces the bit-at-a-time renormalization loop.
+        if self.state < table_size {
+            assert!(self.state > 0, "decoded a zero state from a corrupt stream");
+            let needed = scale_bits - (31 - self.state.leading_zeros());
+            self.state = (self.state << needed) | reader.read(needed);
         }
 
         sym

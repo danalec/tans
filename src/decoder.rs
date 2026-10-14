@@ -13,7 +13,8 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode(&mut self, reader: &mut BitReader) -> u32 {
-        let slot = self.state & (self.table.table_size - 1);
+        let table_size = self.table.table_size;
+        let slot = self.state & (table_size - 1);
         let sym = self.table.find_symbol(slot);
 
         let freq = self.table.frequencies[sym as usize];
@@ -21,9 +22,13 @@ impl<'a> Decoder<'a> {
 
         self.state = freq * (self.state >> self.table.log2_table_size) + slot - start;
 
-        while self.state < self.table.table_size {
-            let bit = reader.read(1);
-            self.state = (self.state << 1) | bit;
+        // Pull the bits the encoder shifted out in one read instead of one bit at
+        // a time: shifting `needed` places is exactly what brings the state back
+        // into [L, 2L).
+        if self.state < table_size {
+            assert!(self.state > 0, "decoded a zero state from a corrupt stream");
+            let needed = self.table.log2_table_size - (31 - self.state.leading_zeros());
+            self.state = (self.state << needed) | reader.read(needed);
         }
 
         sym
