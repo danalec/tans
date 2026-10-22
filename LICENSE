@@ -1,0 +1,95 @@
+tANS License
+
+Copyright (c) 2026 Dan Alec Yamaguchi
+
+This License governs the tANS/FSE entropy codec ("the Licensed Work"). It
+combines two well-known licenses that apply at the same time, and adds one
+restriction on commercial use.
+
+1. Grant of rights
+
+The Licensor grants you the right to copy, modify, create derivative works of,
+redistribute, and use the Licensed Work, provided that:
+
+  a. you comply with the MIT License (LICENSE-MIT) and the Apache License,
+     Version 2.0 (LICENSE-APACHE), both of which apply to the Licensed Work
+     simultaneously and in full, and are incorporated into this License by
+     reference; and
+
+  b. your use of the Licensed Work complies with the Commercial Use Restriction
+     in section 2.
+
+The two licenses apply together, not as alternatives. You must comply with the
+MIT License and the Apache License, Version 2.0 at the same time; where their
+terms differ, the stricter obligation applies. In particular, the permission in
+the MIT License to use, copy, modify, merge, publish, distribute, sublicense
+and sell copies of the Software, and the grant in the Apache License, Version
+2.0 to reproduce, prepare derivative works of, and display publicly the
+Licensed Work, are each subject to section 2 below.
+
+2. Commercial Use Restriction
+
+"Commercial Use" means use of the Licensed Work, or of a derivative work of
+it, in the course of any activity whose primary purpose is to obtain a
+commercial advantage or monetary gain from the Licensed Work. It includes,
+without limitation:
+
+  a. shipping the Licensed Work, or a derivative work of it, inside a product
+     or service that you sell, license, or are paid for;
+
+  b. offering the Licensed Work, or a derivative work of it, to third parties
+     as a hosted, managed, or embedded component, whether or not for a fee;
+
+  c. using the Licensed Work to build a product or service whose value derives
+     from it.
+
+Commercial Use is not granted by this License. To make Commercial Use, you must
+obtain a commercial license from the Licensor; until you have one, you must
+refrain from Commercial Use of the Licensed Work.
+
+Use of the Licensed Work for research, evaluation, education, hobby and personal
+purposes, and for the development and testing of software that you do not
+distribute or offer commercially, is not Commercial Use, and is granted under
+section 1.
+
+This restriction applies to each version of the Licensed Work separately. It
+ends for a given version when the Licensor re-releases that version under
+terms that permit Commercial Use. The Licensor's current intention is to
+relicense the crate under the MIT License and the Apache License, Version 2.0
+with no further restriction; until that happens, the terms above apply.
+
+3. Termination
+
+Any use of the Licensed Work in violation of section 2 automatically terminates
+your rights under this License for the version in question and for every other
+version of the Licensed Work.
+
+4. Redistribution
+
+If you distribute the Licensed Work or a derivative work of it, you must
+include a copy of this License, the text of the MIT License (LICENSE-MIT), the
+text of the Apache License, Version 2.0 (LICENSE-APACHE), and the NOTICE file
+that accompanies them.
+
+5. No warranty
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
+AN "AS IS" BASIS, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+INCLUDING, WITHOUT LIMITATION, WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE LICENSOR BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+LICENSED WORK OR THE USE OR OTHER DEALINGS IN THE LICENSED WORK.
+
+6. Trademarks
+
+This License does not grant you any right in any trademark or logo of the
+Licensor or its affiliates.
+
+7. Contributions
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the Licensed Work by you, as defined in Section 1 of the
+Apache License, Version 2.0, shall be licensed under this License.
+
+Commercial licensing inquiries: https://github.com/danalec

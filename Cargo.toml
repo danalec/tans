@@ -1,0 +1,26 @@
+[package]
+name = "tans"
+version = "0.1.0"
+edition = "2021"
+description = "tANS/FSE entropy codec implementation"
+license = "LicenseRef-tans-1.0"
+authors = ["Dan Alec Yamaguchi"]
+repository = "https://github.com/danalec/tans"
+homepage = "https://github.com/danalec/tans"
+readme = "README.md"
+keywords = ["entropy", "codec", "rans", "fse", "compression"]
+categories = ["compression", "encoding"]
+rust-version = "1.85"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "tans_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true

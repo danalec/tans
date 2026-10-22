@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt, clippy and tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        shell: bash
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: License headers
+        run: |
+          status=0
+          for file in $(git ls-files 'src/*.rs' 'tests/*.rs' 'benches/*.rs'); do
+            if ! head -n 1 "$file" | grep -q 'SPDX-License-Identifier: LicenseRef-tans-1.0'; then
+              echo "missing SPDX header: $file"
+              status=1
+            fi
+          done
+          exit $status
+        shell: bash
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+        shell: bash
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+        shell: bash
+
+      - name: Tests
+        run: cargo test --all
+        shell: bash
+
+  benches:
+    name: benches compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+        shell: bash
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Benchmarks are timing-sensitive and flaky in CI, so this only proves the
+      # harness and every target still build. Read the numbers on a quiet host.
+      - name: Build benchmarks
+        run: cargo bench --no-run
+        shell: bash
